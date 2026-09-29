@@ -1,0 +1,161 @@
+# Conduit example configuration.
+# This file targets the bundled mock provider so the k6 suites in test/k6 work out of the box.
+# Real-provider examples are at the bottom (commented out). Prices/priors are ILLUSTRATIVE — edit them.
+
+server:
+  listen: ":8080"
+  admin_listen: ":8081"
+  mode: all                 # all | data | control
+  shutdown_grace: 30s
+  max_body_bytes: 8388608
+
+storage:
+  driver: sqlite            # sqlite | postgres
+  dsn: "file:/data/conduit.db?_pragma=journal_mode(WAL)"
+  ledger_retention: 30d
+  content_logging: metadata # none | metadata | hashed | full
+
+cluster:
+  state_sync: none          # none | redis | nats
+
+auth:
+  admin_keys: ["${env:CONDUIT_ADMIN_KEY}"]
+  virtual_keys:
+    - id: dev
+      key: "${env:CONDUIT_DEV_KEY}"
+      tenant: default
+      default_policy: default
+      rpm: 100000
+
+providers:
+  - name: mock
+    type: openai            # OpenAI-compatible dialect
+    base_url: http://mock:9001/v1
+    allow_private: true     # required for local/mock endpoints
+    api_keys: ["mock"]
+    rate_limits: { rpm: 1000000, tpm: 1000000000 }
+    timeouts: { connect: 2s, first_token: 20s, total: 120s }
+
+models:
+  - id: mock/premium
+    provider: mock
+    upstream: premium
+    context_tokens: 128000
+    max_output_tokens: 8192
+    capabilities: [tools, json, streaming]
+    price_per_mtok: { input: 10.0, output: 30.0 }
+    latency_prior: { ttft_ms: 900, tokens_per_sec: 60 }
+    prior_strength: 20
+    priors: { default: 0.90, code: 0.92, reasoning_math: 0.92, chat: 0.92 }
+
+  - id: mock/balanced
+    provider: mock
+    upstream: balanced
+    context_tokens: 128000
+    max_output_tokens: 8192
+    capabilities: [tools, json, streaming]
+    price_per_mtok: { input: 1.0, output: 4.0 }
+    latency_prior: { ttft_ms: 500, tokens_per_sec: 90 }
+    prior_strength: 20
+    priors: { default: 0.80 }
+
+  - id: mock/fast
+    provider: mock
+    upstream: fast
+    context_tokens: 64000
+    max_output_tokens: 4096
+    capabilities: [tools, json, streaming]
+    price_per_mtok: { input: 0.15, output: 0.60 }
+    latency_prior: { ttft_ms: 200, tokens_per_sec: 180 }
+    prior_strength: 20
+    priors: { default: 0.70 }
+
+  - id: mock/tiny            # small context window: used to prove the context filter works
+    provider: mock
+    upstream: tiny
+    context_tokens: 4000
+    max_output_tokens: 1024
+    capabilities: [streaming]
+    price_per_mtok: { input: 0.05, output: 0.10 }
+    latency_prior: { ttft_ms: 100, tokens_per_sec: 250 }
+    prior_strength: 20
+    priors: { default: 0.55 }
+
+  - id: mock/notools         # no tool support: used to prove the capability filter works
+    provider: mock
+    upstream: notools
+    context_tokens: 32000
+    max_output_tokens: 4096
+    capabilities: [json, streaming]
+    price_per_mtok: { input: 0.50, output: 1.50 }
+    latency_prior: { ttft_ms: 300, tokens_per_sec: 120 }
+    prior_strength: 20
+    priors: { default: 0.75 }
+
+task_classes: [chat, code, reasoning_math, extraction_structured, summarization,
+               translation, creative_writing, classification_short, rag_qa, tool_agent]
+
+policies:
+  - name: default
+    objective: balanced
+    exploration: { enabled: true, epsilon: 0.02, delta: 0.08, tau: 0.05 }
+    hedging: { enabled: true, min_delay_ms: 800, max_share: 0.05 }
+    reliability: { max_attempts: 3, mid_stream: fail, retry_on_refusal: false }
+    on_infeasible: relax
+    on_soft_limit: downgrade
+    reward:
+      sources: [feedback, validators]      # k6 learning test posts feedback
+
+  # --- Baselines used by test/k6/04_learning.js (static strategies, no learning) ---
+  - name: baseline-best
+    strategy: fixed
+    model: mock/premium
+    reliability: { max_attempts: 3 }
+  - name: baseline-cheap
+    strategy: fixed
+    model: mock/fast
+    reliability: { max_attempts: 3 }
+  - name: round-robin
+    strategy: round_robin
+    models: [mock/premium, mock/balanced, mock/fast]
+    reliability: { max_attempts: 3 }
+
+  # --- Example of a CEL-matched policy ---
+  - name: support-bot
+    match: 'request.metadata.app == "support"'
+    objective: cheap
+    constraints: { min_quality: 0.6, max_latency_ms: 6000 }
+    allow_models: ["mock/balanced", "mock/fast"]
+
+budgets:
+  - scope: key:dev
+    window: month
+    hard_limit_usd: 500
+    soft_limit_usd: 400
+
+cache:
+  exact: { enabled: false, ttl: 10m, max_entries: 10000 }
+
+# ---------------- Real providers (uncomment and adapt) ----------------
+# providers:
+#   - name: openai
+#     type: openai
+#     base_url: https://api.openai.com/v1
+#     api_keys: ["${env:OPENAI_API_KEY}"]
+#   - name: anthropic
+#     type: anthropic
+#     base_url: https://api.anthropic.com
+#     api_keys: ["${env:ANTHROPIC_API_KEY}"]
+#   - name: local
+#     type: openai
+#     base_url: http://localhost:11434/v1     # Ollama
+#     allow_private: true
+#     api_keys: ["ollama"]
+#
+# models:
+#   - id: anthropic/claude-sonnet-5-5
+#     provider: anthropic
+#     upstream: claude-sonnet-5-5
+#     context_tokens: 200000
+#     capabilities: [tools, vision, json, streaming]
+#     price_per_mtok: { input: 0.0, output: 0.0 }   # <- fill in from the provider's price page

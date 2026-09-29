@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.22"
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -count=1 ./internal/... ./pkg/...
+      - run: go test -race -count=1 ./internal/router/... ./internal/stats/... ./internal/health/... ./internal/classify/...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      - name: router bench (regression guard)
+        run: go test -run xxx -bench . -benchmem ./internal/router/... | tee bench.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: bench.txt
+
+  # Short end-to-end gate: compose + mock + k6 01/02/03(errors).
+  # Needs k6 v0.55+. Nightly runs the full matrix (see nightly.yml).
+  e2e:
+    runs-on: ubuntu-latest
+    needs: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build images
+        run: docker compose -f deploy/docker-compose.yml build conduit mock
+      - name: start stack
+        run: |
+          CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+          CONDUIT_DEV_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+          docker compose -f deploy/docker-compose.yml up -d conduit mock
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/healthz && break || sleep 2
+          done
+          curl -sf http://localhost:8080/healthz
+      - name: k6 short suites
+        run: |
+          docker run --rm --network host -w /test \
+            -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+            -e RESULTS_DIR=/results \
+            -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+            -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+            -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+            grafana/k6:0.55.0 run /test/k6/01_overhead.js --env RATE=300 --env DUR=15s
+          docker run --rm --network host -w /test \
+            -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+            -e RESULTS_DIR=/results \
+            -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+            -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+            -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+            grafana/k6:0.55.0 run /test/k6/02_accuracy.js
+          docker run --rm --network host -w /test \
+            -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+            -e RESULTS_DIR=/results \
+            -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+            -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_DEV_KEY || 'admin-dev' }} \
+            -e FAULT=errors \
+            -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+            grafana/k6:0.55.0 run /test/k6/03_chaos.js
+      - name: overhead gate
+        run: make verify
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results
+          path: test-results/
+      - name: teardown
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v

@@ -1,0 +1,32 @@
+# Binaries & build output
+bin/
+dist/
+*.test
+*.out
+test-results/
+*.db
+*.db-wal
+*.db-shm
+
+# Go
+vendor/
+
+# UI
+ui/node_modules/
+ui/dist/
+
+# Env & secrets (never commit real values)
+.env
+.env.*
+!.env.example
+
+# Data caches (fetched datasets are reproducible via tools/datasets/)
+data/
+test/datasets/raw/
+test/datasets/cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

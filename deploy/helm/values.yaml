@@ -1,0 +1,21 @@
+# Minimal Helm values. Full chart (HPA, PDB, Redis/Postgres options) lands in Phase 6.
+image:
+  repository: conduit
+  tag: dev
+  pullPolicy: IfNotPresent
+
+ports:
+  data: 8080
+  admin: 8081
+
+config:
+  existingFile: ""   # set to a ConfigMap name with conduit.yaml, else image default
+
+secrets:
+  adminKey: "admin-dev"    # replace via --set or external-secrets
+  devKey: "sk-conduit-dev"
+
+replicaCount: 1
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: 2, memory: 512Mi }

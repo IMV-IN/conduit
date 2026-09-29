@@ -1,0 +1,10 @@
+{
+  "title": "Conduit overview",
+  "panels": [
+    {"title": "requests/s", "expr": "sum(rate(conduit_requests_total[1m]))"},
+    {"title": "p99 decision latency", "expr": "histogram_quantile(0.99, sum(rate(conduit_route_decision_seconds_bucket[5m])) by (le))"},
+    {"title": "p99 gateway overhead", "expr": "histogram_quantile(0.99, sum(rate(conduit_gateway_overhead_seconds_bucket[5m])) by (le))"},
+    {"title": "spend by model", "expr": "sum by (model) (rate(conduit_cost_usd_total[5m]))"},
+    {"title": "breaker state", "expr": "conduit_breaker_state"}
+  ]
+}

@@ -1,0 +1,32 @@
+{"task":"code","prompt":"Write a Python function that merges two sorted lists into one sorted list.\n```python\ndef merge(a, b):\n    pass\n```"}
+{"task":"code","prompt":"Fix the off-by-one bug in this Go loop: for i := 0; i <= len(xs); i++ { fmt.Println(xs[i]) }"}
+{"task":"code","prompt":"Write a SQL query: SELECT the top 5 customers by total order value from orders(customer_id, amount)."}
+{"task":"code","prompt":"Refactor this JavaScript function to use async/await instead of promise chains: function f(){ return fetch(u).then(r=>r.json()).then(d=>d.x) }"}
+{"task":"reasoning_math","prompt":"A train leaves at 3pm going 60 km/h. Another leaves the same station at 4pm going 90 km/h. At what time does the second catch the first? Show your steps."}
+{"task":"reasoning_math","prompt":"Solve for x: 3x^2 - 12x + 9 = 0. Explain each step of the derivation."}
+{"task":"reasoning_math","prompt":"If 5 machines make 5 widgets in 5 minutes, how long do 100 machines take to make 100 widgets? Reason step by step."}
+{"task":"reasoning_math","prompt":"Prove that the sum of the first n odd numbers equals n squared."}
+{"task":"extraction_structured","prompt":"Extract the name, email and phone from this text and return JSON with keys name,email,phone: 'Contact Priya Nair at priya@example.com or +91 98765 43210.'"}
+{"task":"extraction_structured","prompt":"From the invoice text below return a JSON object {invoice_no, date, total}: 'Invoice #8841 dated 2026-03-02, total due $1,240.50'"}
+{"task":"extraction_structured","prompt":"List every date mentioned in the paragraph as a JSON array of ISO-8601 strings: 'We met on 3 May 2025 and again on June 9, 2025.'"}
+{"task":"summarization","prompt":"Summarize the following article in three sentences: The city council met on Tuesday to debate a new transit plan that would add bus lanes, extend the metro, and raise fares by ten percent over five years. Supporters argued it would cut commute times; opponents worried about costs to low-income riders."}
+{"task":"summarization","prompt":"Give me a TL;DR of this meeting transcript: Alice proposed shipping on Friday. Bob said QA needs two more days. They agreed to ship Monday if the regression suite passes."}
+{"task":"summarization","prompt":"Condense this paragraph into one sentence: Photosynthesis is the process by which plants, algae and some bacteria convert light energy into chemical energy stored in glucose, releasing oxygen as a by-product."}
+{"task":"translation","prompt":"Translate to French: 'Where is the nearest train station, and how much is a ticket to the airport?'"}
+{"task":"translation","prompt":"Translate the following into Hindi: 'Thank you for your help, we will contact you tomorrow.'"}
+{"task":"translation","prompt":"Translate this German sentence into English: 'Ich hätte gern einen Tisch für vier Personen um acht Uhr.'"}
+{"task":"creative_writing","prompt":"Write a short poem about monsoon rain over a quiet mountain town."}
+{"task":"creative_writing","prompt":"Write the opening paragraph of a science-fiction story set on a generation ship where the stars have stopped moving."}
+{"task":"creative_writing","prompt":"Compose a witty toast for my best friend's wedding, about ten lines long."}
+{"task":"classification_short","prompt":"Classify the sentiment as positive, negative or neutral: 'The delivery was late but the food was excellent.' Answer with one word."}
+{"task":"classification_short","prompt":"Is this email spam or not spam? Reply with one word: 'You have won a free cruise, click here now!!!'"}
+{"task":"classification_short","prompt":"Label the topic (sports, politics, tech, finance): 'The central bank raised interest rates by 25 basis points.' One word only."}
+{"task":"rag_qa","prompt":"Answer using only the context.\nContext: The Zephyr-9 router supports Wi-Fi 7, has four 2.5GbE ports, and ships with a 3-year warranty.\nQuestion: How long is the warranty on the Zephyr-9?"}
+{"task":"rag_qa","prompt":"<document>Our refund window is 30 days from delivery. Opened software is not refundable.</document>\nBased on the document, can I return opened software after 10 days?"}
+{"task":"rag_qa","prompt":"Context: [1] The museum opens at 9am on weekdays and 10am on weekends. [2] Entry is free on the first Sunday of each month.\nQuestion: When does the museum open on Saturday?"}
+{"task":"tool_agent","prompt":"Use the available tools to look up the current weather in Karnal and then decide whether I should carry an umbrella.","tools":true}
+{"task":"tool_agent","prompt":"Call the calendar tool to find a free 30-minute slot tomorrow afternoon and book it with Raj.","tools":true}
+{"task":"tool_agent","prompt":"Search the knowledge base tool for our refund policy, then draft a reply to the customer using the result.","tools":true}
+{"task":"chat","prompt":"Hey! What are some good ways to stay focused while studying for a long exam?"}
+{"task":"chat","prompt":"Can you explain the difference between a virus and a bacterium in simple terms?"}
+{"task":"chat","prompt":"I'm planning a weekend trip. Any tips on packing light?"}

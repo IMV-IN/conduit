@@ -1,0 +1,74 @@
+# GoReleaser: static binaries + multi-arch images to Docker Hub and GHCR.
+# Tag a release with `git tag v0.1.0 && git push origin v0.1.0`.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go test -count=1 ./internal/... ./pkg/...
+
+builds:
+  - id: conduit
+    main: ./cmd/conduit
+    binary: conduit
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: [arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: mockprovider
+    main: ./test/mockprovider
+    binary: mockprovider
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: conduit-tar
+    builds: [conduit]
+    formats: [tar.gz]
+    files:
+      - conduit.example.yaml
+      - README.md
+      - LICENSE*
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - artifacts: checksum
+    args: ["--batch", "--local-user", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}"]
+    stdin: "{{ .Env.GPG_PASSPHRASE }}"
+
+dockers:
+  - id: conduit
+    image_names:
+      - "{{ .Env.DOCKERHUB_REPO }}/conduit"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/conduit"
+    build_flag_templates:
+      - "--platform={{ .Artifact.Goarch }}"
+      - "--target=conduit"
+      - "--build-arg=VERSION={{.Version}}"
+      - "--file=deploy/Dockerfile"
+    use: buildx
+    ids: [conduit]
+    dockerfile: deploy/Dockerfile
+    extra_files:
+      - conduit.example.yaml
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

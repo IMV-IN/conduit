@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,7 +32,6 @@ type Gateway struct {
 	classify *classifierWrap
 	ledger   *ledger.Store
 	prov     *provider.Client
-	rrMu     sync.Mutex
 	hedgeSem chan struct{}
 }
 
@@ -747,8 +744,6 @@ func (g *Gateway) handleQuality(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------- listeners ----------
-
-var reqID atomic.Uint64
 
 func (g *Gateway) DataMux() *http.ServeMux {
 	mux := http.NewServeMux()

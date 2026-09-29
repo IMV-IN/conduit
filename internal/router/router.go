@@ -145,14 +145,6 @@ func SeedFromID(id string) float64 {
 	return float64(v>>11) / float64(1<<53)
 }
 
-func decisionID() string {
-	var b [16]byte
-	// crypto random would be better; but keep stdlib-only determinism via time+counter
-	h := sha256.Sum256([]byte(time.Now().String()))
-	copy(b[:], h[:16])
-	return "d_" + hexEnc(b[:])
-}
-
 func hexEnc(b []byte) string {
 	const hexd = "0123456789abcdef"
 	out := make([]byte, 0, len(b)*2)
@@ -610,8 +602,6 @@ func upstreamOf(cfg *config.Config, id string) string {
 	}
 	return id
 }
-
-var didCtr uint64
 
 func newDecisionID(req *canonical.Request) string {
 	var b [8]byte

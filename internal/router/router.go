@@ -136,6 +136,17 @@ func Select(ranked []*Candidate, ex Explore, u float64) (int, float64) {
 	return last, (1-ex.Epsilon)*w[last]/z + ex.Epsilon/float64(n)
 }
 
+// exploreScale narrows exploration when the caller stated an explicit quality
+// intent. "best" means "don't experiment on me": models more than a hair
+// below the winner leave the guard set and the epsilon floor halves.
+// Other objectives keep the policy's configured exploration.
+func exploreScale(objective string) float64 {
+	if objective == "best" {
+		return 0.25
+	}
+	return 1.0
+}
+
 // SeedFromID hashes a decision ID to a uniform in [0,1) (reproducible).
 func SeedFromID(id string) float64 {
 	h := fnv.New64a()
@@ -397,6 +408,11 @@ func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) 
 	if !eff.Exploration.Enabled {
 		ex.Epsilon, ex.Delta = 0, 0
 	}
+	// An explicit auto:<objective> intent scales exploration (see exploreScale).
+	if s := exploreScale(obj); s != 1.0 {
+		ex.Delta *= s
+		ex.Epsilon *= 0.5
+	}
 	if ex.Tau <= 0 {
 		ex.Tau = 0.05
 	}
@@ -580,12 +596,14 @@ func (r *Router) estimate(req *canonical.Request, m *config.Model, now time.Time
 		tps = 80
 	}
 	l := ttft + eOut/tps*1000
-	// R: Wilson UB of breaker error rate.
+	// R: Wilson upper bound of the breaker error rate, shrunk toward a small
+	// prior while samples are few. Without shrinkage a model with 0 errors in
+	// 5 requests gets R=0.43, which punishes models merely for being
+	// unexplored and distorts quality-first objectives.
 	errs, total := r.Breaker(m.ID).ErrRate()
-	risk := stats.WilsonUB(errs, total, 1.96)
-	if total < 5 {
-		risk = 0.02
-	}
+	ub := stats.WilsonUB(errs, total, 1.96)
+	w := float64(total) / (float64(total) + 20)
+	risk := (1-w)*0.02 + w*ub
 	return q, c, l, risk
 }
 

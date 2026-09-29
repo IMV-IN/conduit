@@ -259,6 +259,7 @@ p(a)   = (1 − ε)·p_g(a) + ε / |feasible|                         # full sup
 - `ε` (default 0.02) guarantees every feasible model has non-zero probability — required for unbiased off-policy evaluation.
 - Sampling uses a PRNG seeded by `hash(decision_id)`, so any decision can be reproduced exactly.
 - Exploration is disabled per policy (`exploration.enabled: false`) or per request (`x-conduit-explore: off`) for regulated workloads.
+- An explicit `auto:<objective>` intent scales exploration: `best` narrows the guard (`δ × 0.25`, `ε` halved) so "give me the best" doesn't experiment on the caller; other objectives keep the policy's configured values.
 
 *Why not Thompson sampling?* It's excellent for learning, but the propensity of the chosen arm has no closed form (needs Monte-Carlo estimates), which weakens the Replay Lab. The optimism term `κ·sd` in `Q̂` gives Thompson-like directed exploration while keeping propensities exact.
 

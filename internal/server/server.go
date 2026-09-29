@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/IMV-IN/conduit/internal/canonical"
 	"github.com/IMV-IN/conduit/internal/classify"
 	"github.com/IMV-IN/conduit/internal/config"
@@ -23,6 +22,7 @@ import (
 	"github.com/IMV-IN/conduit/internal/provider"
 	"github.com/IMV-IN/conduit/internal/router"
 	"github.com/IMV-IN/conduit/internal/telemetry"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Gateway is the full service.
@@ -296,6 +296,7 @@ type execResult struct {
 	attempts      int
 	cached        bool
 	upstreamSpent time.Duration
+	ttftStats     float64 // TTFT for the latency EWMA; 0 = unknown (non-streaming totals would corrupt it)
 	err           error
 }
 
@@ -337,7 +338,7 @@ func (g *Gateway) execute(ctx context.Context, creq *canonical.Request, plan *ro
 			res.attempts = attempts
 			res.modelID = a.ModelID
 			res.upstreamSpent = time.Since(totalT0)
-			g.router.ReportOutcome(a.ModelID, true, res.ttftMs)
+			g.router.ReportOutcome(a.ModelID, true, res.ttftStats)
 			// Hedge accounting: if we hedged (i>0 due to slowness) note it.
 			return res
 		}
@@ -399,6 +400,8 @@ func (g *Gateway) tryOnce(ctx context.Context, baseURL, apiKey string, body []by
 		ttft := float64(time.Since(t0).Microseconds()) / 1000
 		inTok, outTok := parseUsage(b)
 		cost := costOf(m, inTok, outTok, creqInFallback(body))
+		// Non-streaming completion time is NOT time-to-first-token; keep it
+		// for the ledger/cost path but out of the latency EWMA (ttftStats=0).
 		return &execResult{body: b, inTok: inTok, outTok: outTok, costUSD: cost, ttftMs: ttft}, nil
 	}
 	// Streaming: buffer until first SSE data line (first-token gate) — nothing
@@ -428,7 +431,7 @@ func (g *Gateway) tryOnce(ctx context.Context, baseURL, apiKey string, body []by
 	inTok := creqInFallback(body)
 	outTok := 48
 	cost := costOf(m, inTok, outTok, inTok)
-	return &execResult{streaming: true, firstChunk: first.Bytes(), streamBody: rest, inTok: inTok, outTok: outTok, costUSD: cost, ttftMs: ttft}, nil
+	return &execResult{streaming: true, firstChunk: first.Bytes(), streamBody: rest, inTok: inTok, outTok: outTok, costUSD: cost, ttftMs: ttft, ttftStats: ttft}, nil
 }
 
 func creqInFallback(body []byte) int {

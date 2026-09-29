@@ -91,7 +91,7 @@ jobs:
           curl -sf http://localhost:8080/healthz
       - name: k6 short suites
         run: |
-          mkdir -p test-results   # else docker creates it root-owned and k6 cannot write /results
+          mkdir -p test-results && chmod 777 test-results   # dir must be world-writable: the k6 container runs as non-root, else /results writes fail with permission denied
           docker run --rm --network host -w /test \
             -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
             -e RESULTS_DIR=/results \

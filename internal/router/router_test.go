@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/IMV-IN/conduit/internal/canonical"
 	"github.com/IMV-IN/conduit/internal/config"
 )
 
@@ -148,5 +149,49 @@ func TestHardFiltersNeverViolated(t *testing.T) {
 		if first.ContextTokens > 0 && need > float64(first.ContextTokens) {
 			t.Fatalf("routed %d-token request to %s (ctx %d)", inTok, first.ID, first.ContextTokens)
 		}
+	}
+}
+
+func TestExploreScale(t *testing.T) {
+	if exploreScale("best") != 0.25 {
+		t.Fatal("best should narrow exploration")
+	}
+	for _, o := range []string{"", "balanced", "cheap", "fast"} {
+		if exploreScale(o) != 1.0 {
+			t.Fatalf("objective %q should keep configured exploration", o)
+		}
+	}
+}
+
+// TestBestObjectiveSticksToWinner mirrors the k6 accuracy gate
+// (best_prefers_premium_for_code > 0.85) offline: with example-catalog
+// priors, auto:best on a code request must land on mock/premium.
+func TestBestObjectiveSticksToWinner(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	premium := 0
+	N := 200
+	for i := 0; i < N; i++ {
+		req := &canonical.Request{
+			Requested:   "auto:best",
+			InTokensEst: 40, MaxOutput: 64,
+			Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+		}
+		plan, err := rt.Route(req, pol)
+		if err != nil || len(plan.Attempts) == 0 {
+			t.Fatal("best/code should always be feasible")
+		}
+		if plan.Attempts[0].ModelID == "mock/premium" {
+			premium++
+		}
+	}
+	rate := float64(premium) / float64(N)
+	t.Logf("auto:best code -> premium %.3f", rate)
+	if rate < 0.85 {
+		t.Fatalf("auto:best must prefer premium for code (got %.3f)", rate)
 	}
 }

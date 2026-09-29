@@ -81,8 +81,11 @@ e2e: $(RESULTS)
 	FAULT=errors $(K6) run test/k6/03_chaos.js
 
 # Fail CI if the gateway overhead budget is exceeded (see docs/TESTING.md).
+# Thresholds are env-overridable for noisy shared runners; defaults are the
+# documented budgets. Tune only with measured evidence, never to silence red.
 verify: k6-overhead
-	@jq -e '.overhead_p99_ms < 5 and .overhead_p50_ms < 1.5' $(RESULTS)/overhead.json >/dev/null \
+	@jq -e --argjson p50 "$${VERIFY_P50:-1.5}" --argjson p99 "$${VERIFY_P99:-5}" \
+	  '.overhead_p99_ms < $$p99 and .overhead_p50_ms < $$p50' $(RESULTS)/overhead.json >/dev/null \
 	  && echo "overhead OK" || (echo "overhead budget exceeded"; jq . $(RESULTS)/overhead.json; exit 1)
 
 goreleaser-snapshot:

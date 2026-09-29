@@ -55,10 +55,15 @@ export const options = {
 };
 
 export function setup() {
-  const r = mockProfile('fast', {
-    ttft_median_ms: 1, ttft_sigma: 0, tokens_per_sec: 0, output_tokens: 16, error_rate: 0,
-  });
-  check(r, { 'mock configured': (x) => x.status === 204 });
+  // Flatten ALL upstream latencies: the overhead suite must measure gateway
+  // cost only. Exploration still runs (and may pick any model), so every
+  // profile has to be equally fast or the tail measures mock TTFT, not Conduit.
+  for (const m of ['fast', 'premium', 'balanced', 'tiny', 'notools']) {
+    const r = mockProfile(m, {
+      ttft_median_ms: 1, ttft_sigma: 0, tokens_per_sec: 0, output_tokens: 16, error_rate: 0,
+    });
+    check(r, { [`mock ${m} configured`]: (x) => x.status === 204 });
+  }
 }
 
 export function teardown() {

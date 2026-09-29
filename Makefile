@@ -5,7 +5,7 @@ RESULTS ?= test-results
 GO ?= go
 
 .PHONY: build test test-short lint vuln bench mock up down obs \
-	k6-all k6-overhead k6-accuracy k6-chaos k6-learning k6-soak verify \
+	k6-all k6-overhead k6-accuracy k6-chaos k6-learning k6-soak verify verify-full \
 	validate doctor datasets e2e goreleaser-snapshot
 
 build:
@@ -80,13 +80,16 @@ e2e: $(RESULTS)
 	$(K6) run test/k6/02_accuracy.js
 	FAULT=errors $(K6) run test/k6/03_chaos.js
 
-# Fail CI if the gateway overhead budget is exceeded (see docs/TESTING.md).
-# Thresholds are env-overridable for noisy shared runners; defaults are the
-# documented budgets. Tune only with measured evidence, never to silence red.
-verify: k6-overhead
+# Gate an already-produced results file (CI runs k6 via docker first, then
+# calls this; it must NOT re-run k6 because the runner has no k6 binary).
+verify:
+	@test -f $(RESULTS)/overhead.json || (echo "missing $(RESULTS)/overhead.json; run 'make k6-overhead' first"; exit 1)
 	@jq -e --argjson p50 "$${VERIFY_P50:-1.5}" --argjson p99 "$${VERIFY_P99:-5}" \
 	  '.overhead_p99_ms < $$p99 and .overhead_p50_ms < $$p50' $(RESULTS)/overhead.json >/dev/null \
 	  && echo "overhead OK" || (echo "overhead budget exceeded"; jq . $(RESULTS)/overhead.json; exit 1)
+
+# Local convenience: run the suite, then gate it.
+verify-full: k6-overhead verify
 
 goreleaser-snapshot:
 	command -v goreleaser >/dev/null && goreleaser release --snapshot --clean || echo "goreleaser not installed"

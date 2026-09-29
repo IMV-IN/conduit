@@ -17,14 +17,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/yourorg/conduit/internal/canonical"
-	"github.com/yourorg/conduit/internal/classify"
-	"github.com/yourorg/conduit/internal/config"
-	"github.com/yourorg/conduit/internal/health"
-	"github.com/yourorg/conduit/internal/ledger"
-	"github.com/yourorg/conduit/internal/provider"
-	"github.com/yourorg/conduit/internal/router"
-	"github.com/yourorg/conduit/internal/telemetry"
+	"github.com/IMV-IN/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/classify"
+	"github.com/IMV-IN/conduit/internal/config"
+	"github.com/IMV-IN/conduit/internal/health"
+	"github.com/IMV-IN/conduit/internal/ledger"
+	"github.com/IMV-IN/conduit/internal/provider"
+	"github.com/IMV-IN/conduit/internal/router"
+	"github.com/IMV-IN/conduit/internal/telemetry"
 )
 
 // Gateway is the full service.

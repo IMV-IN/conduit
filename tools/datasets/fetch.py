@@ -6,7 +6,9 @@ Secrets (all optional; the script degrades gracefully without them):
   HF_TOKEN         https://huggingface.co/settings/tokens (raises rate limits,
                    unlocks gated sets like gsm8k after you accept the license)
   KAGGLE_USERNAME / KAGGLE_KEY   https://www.kaggle.com/settings/account
-                   (or ~/.kaggle/kaggle.json)
+                   (or ~/.kaggle/kaggle.json).
+                   KAGGLE_API_TOKEN is accepted as an alias for KAGGLE_KEY
+                   when KAGGLE_USERNAME is also set.
   OPENROUTER_API_KEY  reserved for future judge-based labeling (unused today)
 
 Usage:
@@ -95,16 +97,40 @@ def fetch_hf(dataset_id: str, limit: int):
         return []
 
 
+def kaggle_creds():
+    """Resolve (username, key) from env, `~/.kaggle/kaggle.json`, or the
+    single-token form (KAGGLE_API_TOKEN as key + KAGGLE_USERNAME)."""
+    user = os.environ.get("KAGGLE_USERNAME")
+    key = os.environ.get("KAGGLE_KEY") or os.environ.get("KAGGLE_API_TOKEN")
+    if user and key:
+        return user, key
+    kj = Path.home().joinpath(".kaggle/kaggle.json")
+    if kj.exists():
+        try:
+            d = json.loads(kj.read_text())
+            if d.get("username") and d.get("key"):
+                return d["username"], d["key"]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None, None
+
+
 def fetch_kaggle(ref: str, limit: int):
-    if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")) \
-            and not Path.home().joinpath(".kaggle/kaggle.json").exists():
-        print(f"  [skip] kaggle:{ref} (no KAGGLE_USERNAME/KAGGLE_KEY)", file=sys.stderr)
+    user, key = kaggle_creds()
+    if not (user and key):
+        print(f"  [skip] kaggle:{ref} (need KAGGLE_USERNAME + KAGGLE_KEY, "
+              f"or KAGGLE_API_TOKEN + KAGGLE_USERNAME)", file=sys.stderr)
         return []
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
     except ImportError:
         print("  [skip] `kaggle` not installed", file=sys.stderr)
         return []
+    # The kaggle package authenticates from KAGGLE_USERNAME/KAGGLE_KEY env
+    # (or kaggle.json); export the resolved pair so the alias form works too.
+    os.environ.setdefault("KAGGLE_USERNAME", user)
+    if not os.environ.get("KAGGLE_KEY"):
+        os.environ["KAGGLE_KEY"] = key
     try:
         api = KaggleApi()
         api.authenticate()

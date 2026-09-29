@@ -47,8 +47,9 @@ down:
 obs:
 	docker compose -f deploy/docker-compose.yml --profile obs up -d
 
-# ---- datasets ----
+# ---- datasets (self-provisioning: installs python deps if missing) ----
 datasets:
+	@python3 -c "import datasets" 2>/dev/null || pip install -r tools/datasets/requirements.txt
 	python3 tools/datasets/fetch.py --out test/datasets --max-per-source 200
 
 # ---- k6 suites (need Conduit + mock; `make up` first) ----

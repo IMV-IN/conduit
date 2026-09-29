@@ -3,7 +3,7 @@ name: conduit
 services:
   conduit:
     build: { context: .., dockerfile: deploy/Dockerfile, target: conduit }
-    image: "${CONDUIT_IMAGE:-conduit:dev}"
+    image: "${CONDUIT_IMAGE:-ys1nghc/conduit:dev}"
     ports: ["8080:8080", "8081:8081"]
     environment:
       CONDUIT_ADMIN_KEY: ${CONDUIT_ADMIN_KEY:-admin-dev}

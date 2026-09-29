@@ -1,8 +1,8 @@
 package router
 
 import (
-	"github.com/yourorg/conduit/internal/canonical"
-	"github.com/yourorg/conduit/internal/config"
+	"github.com/IMV-IN/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/config"
 )
 
 func requestFor(tools bool, inTok int) *canonical.Request {

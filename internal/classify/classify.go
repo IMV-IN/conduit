@@ -5,7 +5,7 @@ package classify
 import (
 	"strings"
 
-	"github.com/yourorg/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/canonical"
 )
 
 var known = map[string]bool{

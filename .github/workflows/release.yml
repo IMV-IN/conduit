@@ -23,7 +23,7 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     env:
-      DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'conduit' }}
+      DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'ys1nghc' }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/conduit/internal/config"
-	"github.com/yourorg/conduit/internal/server"
+	"github.com/IMV-IN/conduit/internal/config"
+	"github.com/IMV-IN/conduit/internal/server"
 )
 
 var version = "dev"

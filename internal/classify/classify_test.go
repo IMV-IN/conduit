@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/yourorg/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/canonical"
 )
 
 type labeled struct {

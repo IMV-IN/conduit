@@ -1,4 +1,4 @@
-module github.com/yourorg/conduit
+module github.com/IMV-IN/conduit
 
 go 1.22
 

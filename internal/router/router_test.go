@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/yourorg/conduit/internal/config"
+	"github.com/IMV-IN/conduit/internal/config"
 )
 
 func testModels() []*Candidate {

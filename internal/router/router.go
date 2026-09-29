@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/conduit/internal/canonical"
-	"github.com/yourorg/conduit/internal/config"
-	"github.com/yourorg/conduit/internal/health"
-	"github.com/yourorg/conduit/internal/stats"
+	"github.com/IMV-IN/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/config"
+	"github.com/IMV-IN/conduit/internal/health"
+	"github.com/IMV-IN/conduit/internal/stats"
 )
 
 // Weights for the utility score.

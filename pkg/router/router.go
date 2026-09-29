@@ -3,9 +3,9 @@
 package router
 
 import (
-	"github.com/yourorg/conduit/internal/canonical"
-	"github.com/yourorg/conduit/internal/config"
-	irouter "github.com/yourorg/conduit/internal/router"
+	"github.com/IMV-IN/conduit/internal/canonical"
+	"github.com/IMV-IN/conduit/internal/config"
+	irouter "github.com/IMV-IN/conduit/internal/router"
 )
 
 type (

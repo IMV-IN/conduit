@@ -123,8 +123,12 @@ Targets are *initial* budgets. Tighten them once you have measurements on your h
     end-to-end against a throwaway stand-in, which exposed and fixed two
     harness bugs (a vacuous PASS when all requests fail, and double-counted
     samples).
-- Not verified: full k6 suites `01`–`05` against this gateway binary at the
-  target rates (needs two machines or pinned CPUs per §4); every number in
-  the targets table remains a goal until a measured run with published
-  hardware details and raw JSON says otherwise. Suites `02`, `03`, `05`
-  have only been syntax-checked plus covered by the equivalent Go tests.
+- Not verified: full k6 suites `01`–`05` at the documented target rates on
+  isolated hardware (every number in the targets table remains a goal until a
+  measured run with published hardware details and raw JSON says otherwise).
+  Suites `04` (learning) and `05` (soak) have only been syntax-checked plus
+  covered by the equivalent Go tests; `03` has run green for `FAULT=errors`
+  (locally and in CI) but the `down`/`slow` variants have not. Concurrent
+  hedging and latency-ejection are not yet implemented (sequential failover
+  only) — required before the `slow` variant can pass; tracked as Phase 2
+  remainder in `IMPLEMENTATION_PLAN.md`.

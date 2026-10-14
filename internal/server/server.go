@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IMV-IN/conduit/internal/canonical"
@@ -32,7 +33,7 @@ type Gateway struct {
 	classify *classifierWrap
 	ledger   *ledger.Store
 	prov     *provider.Client
-	hedgeSem chan struct{}
+	hedges   hedgeBudget
 }
 
 type classifierWrap struct{ c *classify.Classifier }
@@ -44,7 +45,7 @@ func New(cfg *config.Config) *Gateway {
 		classify: &classifierWrap{classify.New()},
 		ledger:   ledger.New(100000),
 		prov:     provider.NewClient(),
-		hedgeSem: make(chan struct{}, 200),
+		hedges:   newHedgeBudget(100),
 	}
 }
 
@@ -314,12 +315,27 @@ func spliceModel(raw []byte, upstream string) []byte {
 	return out
 }
 
+// attemptOut is one finished upstream attempt.
+type attemptOut struct {
+	idx int
+	res *execResult
+	err error
+}
+
 func (g *Gateway) execute(ctx context.Context, creq *canonical.Request, plan *router.Plan, raw []byte) *execResult {
 	totalT0 := time.Now()
-	var lastErr error
-	attempts := 0
-	for i, a := range plan.Attempts {
-		attempts = i + 1
+
+	// Resolve targets up front; unknown models/providers are skipped exactly
+	// like the old sequential loop did.
+	type target struct {
+		attempt router.Attempt
+		model   *config.Model
+		baseURL string
+		apiKey  string
+		body    []byte
+	}
+	var targets []target
+	for _, a := range plan.Attempts {
 		m := g.cfg.ModelByID(a.ModelID)
 		if m == nil {
 			continue
@@ -332,45 +348,205 @@ func (g *Gateway) execute(ctx context.Context, creq *canonical.Request, plan *ro
 		if len(prov.APIKeys) > 0 {
 			apiKey = prov.APIKeys[0]
 		}
-		upBody := spliceModel(raw, a.Upstream)
-		res, err := g.tryOnce(ctx, prov.BaseURL, apiKey, upBody, creq.Stream, m)
-		if err == nil {
-			res.attempts = attempts
-			res.modelID = a.ModelID
-			res.upstreamSpent = time.Since(totalT0)
-			g.router.ReportOutcome(a.ModelID, true, res.ttftStats)
-			// Hedge accounting: if we hedged (i>0 due to slowness) note it.
-			return res
-		}
-		lastErr = err
-		g.router.ReportOutcome(a.ModelID, false, 0)
-		if pe, ok := err.(*provider.Error); ok {
-			if pe.Class == provider.ClassClient || pe.Class == provider.ClassAuth || pe.Class == provider.ClassRefusal {
-				// Auth: quarantine-ish (breaker already fed). Client errors: do not retry same class?
-				// For v0: client 400s are not retried (not provider fault) except context-exceeded
-				// which retries a larger-context model (already ordered later in plan).
-				if pe.Class == provider.ClassContextExceeded {
-					continue
-				}
-				if pe.Class != provider.ClassRetryable {
-					break
-				}
-			}
-		}
-		// Provider-diverse skip: if this was a connection-level failure, skip same-provider models.
-		// (Plan is already provider-diverse first, so just continue.)
+		targets = append(targets, target{a, m, prov.BaseURL, apiKey, spliceModel(raw, a.Upstream)})
+	}
+	if len(targets) == 0 {
+		return &execResult{err: fmt.Errorf("no resolvable attempt targets"), upstreamSpent: time.Since(totalT0)}
+	}
+
+	// Each request earns hedge credit; spending it launches one speculative
+	// duplicate. Sustained hedging can never exceed maxShare of traffic.
+	share := plan.HedgeMaxShare
+	if share <= 0 {
+		share = 0.05
+	}
+	if plan.HedgeBurst > 0 {
+		g.hedges.ensureBurst(float64(plan.HedgeBurst))
+	}
+	g.hedges.credit(share)
+
+	actx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan attemptOut, len(targets))
+	launched := 0
+	launch := func(i int) {
+		t := targets[i]
+		launched++
+		go func() {
+			res, err := g.tryOnce(actx, t.baseURL, t.apiKey, t.body, creq.Stream, t.model)
+			ch <- attemptOut{idx: i, res: res, err: err}
+		}()
+	}
+	launch(0)
+
+	// Hedge timing is mode-aware. Streaming hedges on first-token time
+	// (HedgeDelay); non-streaming requests can only observe completion, so
+	// they use the padded total (HedgeDelayTotal) — otherwise every healthy
+	// non-stream request slower than the first-token delay would hedge and
+	// drain the budget before it is ever needed.
+	d := plan.HedgeDelay
+	if !creq.Stream && plan.HedgeDelayTotal > d {
+		d = plan.HedgeDelayTotal
+	}
+	var hedgeTimer <-chan time.Time
+	if d > 0 && len(targets) > 1 {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		hedgeTimer = t.C
+	}
+	next, inflight := 1, 1
+	hedged := false
+	var lastErr error
+	for inflight > 0 {
 		select {
+		case <-hedgeTimer:
+			hedgeTimer = nil // fire once per request
+			// The timer firing is itself slowness evidence for the primary,
+			// counted even if the budget denies the launch — this is what
+			// re-ejects a still-slow model during probe windows, before a
+			// wave of slow completions can form.
+			if next < len(targets) {
+				g.router.ReportHedgeLaunched(targets[0].attempt.ModelID)
+				telemetry.Hedges.WithLabelValues("fired").Inc()
+			}
+			if next < len(targets) && g.hedges.allow() {
+				telemetry.Hedges.WithLabelValues("launched").Inc()
+				launch(next)
+				next++
+				inflight++
+				hedged = true
+			}
+		case o := <-ch:
+			inflight--
+			t := targets[o.idx]
+			if o.err == nil {
+				if hedged && o.idx > 0 {
+					telemetry.Hedges.WithLabelValues("hedge_won").Inc()
+				} else {
+					telemetry.Hedges.WithLabelValues("primary_won").Inc()
+				}
+				cancel() // losers abort; their bodies are closed by drainLosers
+				if inflight > 0 {
+					go drainLosers(ch, inflight)
+				}
+				o.res.attempts = launched
+				o.res.modelID = t.attempt.ModelID
+				o.res.upstreamSpent = time.Since(totalT0)
+				g.router.ReportOutcome(t.attempt.ModelID, true, o.res.ttftStats)
+				return o.res
+			}
+			lastErr = o.err
+			g.router.ReportOutcome(t.attempt.ModelID, false, 0)
+			if !shouldFailover(o.err) {
+				cancel()
+				if inflight > 0 {
+					go drainLosers(ch, inflight)
+				}
+				return &execResult{err: lastErr, attempts: launched, upstreamSpent: time.Since(totalT0)}
+			}
+			// Retryable failure (or context-exceeded): fail over now.
+			// The hedge timer keeps running if it hasn't fired.
+			if next < len(targets) {
+				launch(next)
+				next++
+				inflight++
+			}
 		case <-ctx.Done():
-			return &execResult{err: ctx.Err(), attempts: attempts, upstreamSpent: time.Since(totalT0)}
-		default:
+			cancel()
+			if inflight > 0 {
+				go drainLosers(ch, inflight)
+			}
+			return &execResult{err: ctx.Err(), attempts: launched, upstreamSpent: time.Since(totalT0)}
 		}
 	}
-	return &execResult{err: lastErr, attempts: attempts, upstreamSpent: time.Since(totalT0)}
+	return &execResult{err: lastErr, attempts: launched, upstreamSpent: time.Since(totalT0)}
 }
 
-// tryOnce performs one upstream call with first-token gating.
-// For hedge/slow faults the caller runs attempts sequentially; hedging (concurrent)
-// is handled by tryHedged when plan.HedgeDelay > 0 and streaming.
+// shouldFailover reports whether an attempt error warrants trying the next
+// model. Retryable upstream failures and context-exceeded always fail over;
+// client errors, auth failures and refusals are terminal (not the next
+// model's fault, or a policy decision to return as-is).
+func shouldFailover(err error) bool {
+	if pe, ok := err.(*provider.Error); ok {
+		switch pe.Class {
+		case provider.ClassClient, provider.ClassAuth, provider.ClassRefusal:
+			return false
+		}
+	}
+	return true
+}
+
+// drainLosers closes the (already first-token-gated) streams of attempts that
+// lost the race. It runs in the background so the winner streams immediately;
+// the buffered channel guarantees it terminates without leaking goroutines.
+func drainLosers(ch <-chan attemptOut, n int) {
+	for i := 0; i < n; i++ {
+		if o := <-ch; o.res != nil && o.res.streamBody != nil {
+			o.res.streamBody.Close()
+		}
+	}
+}
+
+// hedgeBudget is a token bucket capping speculative hedged requests to a
+// share of traffic. Requests earn fractional credit; one hedge costs 1 token.
+// The bucket starts FULL: bursts are for absorbing correlated transients
+// (fault onset, post-eject probes), and an empty-start bucket could never
+// accumulate faster than incident demand at high traffic. Sustained hedging
+// stays capped by the income share regardless of the starting level.
+type hedgeBudget struct {
+	mu     sync.Mutex
+	tokens float64
+	burst  float64
+}
+
+func newHedgeBudget(burst float64) hedgeBudget {
+	if burst <= 0 {
+		burst = 100
+	}
+	return hedgeBudget{tokens: burst, burst: burst}
+}
+
+func (b *hedgeBudget) credit(share float64) {
+	if share < 0 {
+		share = 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.burst <= 0 {
+		b.burst = 100
+	}
+	b.tokens += share
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+}
+
+func (b *hedgeBudget) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
+}
+
+// ensureBurst raises the bucket to at least n (policies may size bursts for
+// their traffic; the bucket never shrinks underfoot to avoid racing).
+func (b *hedgeBudget) ensureBurst(n float64) {
+	if n <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.burst < n {
+		b.burst = n
+	}
+}
+
+// tryOnce performs one upstream call with first-token gating: it returns only
+// after the upstream produced its first chunk (buffered), so failover and
+// hedging stay invisible to the client.
 func (g *Gateway) tryOnce(ctx context.Context, baseURL, apiKey string, body []byte, stream bool, m *config.Model) (*execResult, error) {
 	t0 := time.Now()
 	resp, err := g.prov.DoChat(ctx, baseURL, apiKey, body)
@@ -400,9 +576,19 @@ func (g *Gateway) tryOnce(ctx context.Context, baseURL, apiKey string, body []by
 		ttft := float64(time.Since(t0).Microseconds()) / 1000
 		inTok, outTok := parseUsage(b)
 		cost := costOf(m, inTok, outTok, creqInFallback(body))
-		// Non-streaming completion time is NOT time-to-first-token; keep it
-		// for the ledger/cost path but out of the latency EWMA (ttftStats=0).
-		return &execResult{body: b, inTok: inTok, outTok: outTok, costUSD: cost, ttftMs: ttft}, nil
+		// Non-streaming completion time is NOT time-to-first-token, so it
+		// stays out of the ledger's TTFT field — but the latency tracker
+		// still needs a signal for ejection/scoring. Estimate first-token
+		// time as total minus expected output time (EWMA-smoothed downstream).
+		tps := m.LatencyPrior.TokensPerSec
+		if tps <= 0 {
+			tps = 80
+		}
+		ttftStats := ttft - float64(outTok)/tps*1000
+		if ttftStats < 0 {
+			ttftStats = 0
+		}
+		return &execResult{body: b, inTok: inTok, outTok: outTok, costUSD: cost, ttftMs: ttft, ttftStats: ttftStats}, nil
 	}
 	// Streaming: buffer until first SSE data line (first-token gate) — nothing
 	// is sent to the client before this returns.
@@ -531,7 +717,12 @@ func (g *Gateway) recordDecision(plan *router.Plan, creq *canonical.Request, res
 		CostUSD: cost, Relaxed: plan.Relaxed,
 	}
 	if len(plan.Attempts) > 0 {
+		// The ledger must record the model that actually won, not the
+		// planned primary — hedging and failover routinely differ.
 		rec.Chosen = plan.Attempts[0].ModelID
+		if res != nil && res.modelID != "" {
+			rec.Chosen = res.modelID
+		}
 	}
 	for _, c := range plan.Candidates {
 		if c.Model == nil {
@@ -706,7 +897,11 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			v = 2
 		}
 		telemetry.BreakerState.WithLabelValues(m.ID).Set(float64(v))
-		out = append(out, map[string]any{"model": m.ID, "state": b.State().String()})
+		entry := map[string]any{"model": m.ID, "state": b.State().String()}
+		if until, ok := g.router.EjectUntil(m.ID); ok {
+			entry["slow_eject_until"] = until.UTC().Format(time.RFC3339)
+		}
+		out = append(out, entry)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"breakers": out})

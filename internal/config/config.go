@@ -94,6 +94,10 @@ type Hedging struct {
 	Enabled    bool    `yaml:"enabled"`
 	MinDelayMs int     `yaml:"min_delay_ms"`
 	MaxShare   float64 `yaml:"max_share"`
+	// Burst caps a single transient (fault onset, post-eject probe) so
+	// every in-flight request can hedge while the ejection decision forms.
+	// Sustained hedging stays capped by MaxShare. <=0 selects 100.
+	Burst int `yaml:"burst"`
 }
 
 type Reliability struct {

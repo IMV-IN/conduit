@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/IMV-IN/conduit/internal/canonical"
 	"github.com/IMV-IN/conduit/internal/config"
@@ -153,7 +154,7 @@ func TestHardFiltersNeverViolated(t *testing.T) {
 }
 
 func TestExploreScale(t *testing.T) {
-	if exploreScale("best") != 0.25 {
+	if exploreScale("best") != 0.2 {
 		t.Fatal("best should narrow exploration")
 	}
 	for _, o := range []string{"", "balanced", "cheap", "fast"} {
@@ -193,5 +194,402 @@ func TestBestObjectiveSticksToWinner(t *testing.T) {
 	t.Logf("auto:best code -> premium %.3f", rate)
 	if rate < 0.85 {
 		t.Fatalf("auto:best must prefer premium for code (got %.3f)", rate)
+	}
+}
+
+func TestLatencyEjection(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	// 12 slow-but-successful samples at ~6.7x the 900ms prior.
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)
+	}
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatalf("other models must stay feasible: %v", err)
+	}
+	if plan.Attempts[0].ModelID == "mock/premium" {
+		t.Fatal("slow model must be ejected from primary")
+	}
+	for _, a := range plan.Attempts {
+		if a.ModelID == "mock/premium" {
+			t.Fatal("ejected model must not appear in attempts at all")
+		}
+	}
+	found := false
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject == "slow: latency ejection" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("candidate table must record the ejection reason")
+	}
+}
+
+func TestEjectionExpiryResets(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)
+	}
+	// Force expiry (same package: manipulate directly).
+	rt.mu.Lock()
+	rt.eject["mock/premium"] = time.Now().Add(-time.Second)
+	rt.mu.Unlock()
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// The probe trickles admission (1-in-10): over 100 draws premium must
+	// be admitted a handful of times, rejected with "slow: probing" (not
+	// full ejection) otherwise, and never ejected while evidence is clean.
+	premium, probing, ejected := 0, 0, 0
+	for i := 0; i < 100; i++ {
+		plan, err := rt.Route(req, cfg.PolicyByName("default"))
+		if err != nil || len(plan.Attempts) == 0 {
+			t.Fatalf("expired ejection must allow a probe: %v", err)
+		}
+		if plan.Attempts[0].ModelID == "mock/premium" {
+			premium++
+		}
+		for _, c := range plan.Candidates {
+			if c.Model.ID != "mock/premium" || c.Reject == "" {
+				continue
+			}
+			if c.Reject == "slow: probing" {
+				probing++
+			} else {
+				ejected++
+			}
+		}
+	}
+	if ejected > 0 {
+		t.Fatalf("clean probe must not fully eject (%d rejects)", ejected)
+	}
+	if premium < 5 || premium > 20 {
+		t.Fatalf("trickle should admit ~1-in-10 as primary, got %d/100", premium)
+	}
+	if probing < 70 {
+		t.Fatalf("expected most draws to hit the trickle gate, got %d/100", probing)
+	}
+	if v, n := rt.ewma("mock/premium").Get(); n != 0 || v != 900 {
+		t.Fatalf("EWMA should reset to prior on expiry, got v=%v n=%v", v, n)
+	}
+}
+
+func TestSlowModelNeedsEvidence(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	// One slow sample must NOT eject (needs >= 10).
+	rt.ReportOutcome("mock/premium", true, 60000)
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// One slow sample must NOT eject (needs >= 10). Asserted on the
+	// deterministic ranking (top utility, no reject reason) rather than the
+	// sampled draw, which carries a 1% epsilon floor by design.
+	plan, err := rt.Route(req, cfg.PolicyByName("default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	best := ""
+	bestU := -1e18
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject != "" {
+			t.Fatalf("a single slow sample must not eject (reject=%q)", c.Reject)
+		}
+		if c.Reject == "" && c.U > bestU {
+			best, bestU = c.Model.ID, c.U
+		}
+	}
+	if best != "mock/premium" {
+		t.Fatalf("premium should still rank first, got %s", best)
+	}
+}
+
+func TestHedgeDelayTotal(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	plan, err := rt.Route(req, cfg.PolicyByName("default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.HedgeDelay <= 0 {
+		t.Fatal("example policy enables hedging")
+	}
+	// Total pads the delay with the CHOSEN primary's expected output time
+	// (derived from the draw, so the assertion holds for any selection).
+	chosen := cfg.ModelByID(plan.Attempts[0].ModelID)
+	tps := chosen.LatencyPrior.TokensPerSec
+	if tps <= 0 {
+		tps = 80
+	}
+	eOut := 48.0 // min(MaxOutput=64, task p50 48)
+	want := plan.HedgeDelay + time.Duration(eOut/tps*1000)*time.Millisecond
+	if plan.HedgeDelayTotal != want {
+		t.Fatalf("HedgeDelayTotal=%v, want %v (primary %s)", plan.HedgeDelayTotal, want, chosen.ID)
+	}
+	if plan.HedgeMaxShare != 0.05 {
+		t.Fatalf("HedgeMaxShare=%v, want 0.05", plan.HedgeMaxShare)
+	}
+}
+
+func TestHedgeLaunchesEject(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// Four hedge losses: not enough.
+	for i := 0; i < 4; i++ {
+		rt.ReportHedgeLaunched("mock/premium")
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil || plan.Attempts[0].ModelID != "mock/premium" {
+		t.Fatal("4 hedge losses must not eject")
+	}
+	// Fifth loss trips ejection.
+	rt.ReportHedgeLaunched("mock/premium")
+	plan, err = rt.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Attempts[0].ModelID == "mock/premium" {
+		t.Fatal("5 hedge losses in a minute must eject")
+	}
+}
+
+func TestEjectionRateGate(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// 5 hedge firings against 500 healthy primary selections (1% firing
+	// rate) must NOT eject: at high traffic absolute counts mislead.
+	for i := 0; i < 500; i++ {
+		rt.notePrimary("mock/premium")
+	}
+	for i := 0; i < 5; i++ {
+		rt.ReportHedgeLaunched("mock/premium")
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil || plan.Attempts[0].ModelID != "mock/premium" {
+		t.Fatal("sub-rate hedge firings must not eject")
+	}
+	// Same 5 firings against 5 primaries (100% rate) must eject.
+	rt2 := New(cfg)
+	for i := 0; i < 5; i++ {
+		rt2.notePrimary("mock/premium")
+		rt2.ReportHedgeLaunched("mock/premium")
+	}
+	plan, err = rt2.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Attempts[0].ModelID == "mock/premium" {
+		t.Fatal("sustained hedge firing rate must eject")
+	}
+}
+
+func TestEjectionBurstRule(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// 25 firings in a burst against a large healthy history must still
+	// eject: correlated slowness right now outweighs old samples.
+	for i := 0; i < 500; i++ {
+		rt.notePrimary("mock/premium")
+	}
+	for i := 0; i < 25; i++ {
+		rt.ReportHedgeLaunched("mock/premium")
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Attempts[0].ModelID == "mock/premium" {
+		t.Fatal("burst of hedge firings must eject despite healthy history")
+	}
+}
+
+func TestHealthyTrickleNoEject(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// 7 firings spread against 300 primaries (~2.3%, healthy-tail-like):
+	// below both the burst floor and the rate gate.
+	for i := 0; i < 300; i++ {
+		rt.notePrimary("mock/premium")
+	}
+	for i := 0; i < 7; i++ {
+		rt.ReportHedgeLaunched("mock/premium")
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil || plan.Attempts[0].ModelID != "mock/premium" {
+		t.Fatal("healthy-tail firing levels must not eject")
+	}
+}
+
+func TestProbeReejectsOnLaunches(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	// Prime slow evidence, then force expiry to open a probe.
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)
+	}
+	rt.mu.Lock()
+	rt.eject["mock/premium"] = time.Now().Add(-time.Second)
+	rt.mu.Unlock()
+	// First route opens the probe and admits (seen=1). Simulate the three
+	// hedge launches the slow probes would record, then the next route must
+	// re-eject via the fast path — without waiting for quota.
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := false
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject != "" {
+			rejected = true
+		}
+	}
+	if rejected {
+		t.Fatal("fresh probe must admit its first check")
+	}
+	rt.ReportHedgeLaunched("mock/premium")
+	rt.ReportHedgeLaunched("mock/premium")
+	rt.ReportHedgeLaunched("mock/premium")
+	plan, err = rt.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject == "slow: latency ejection" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("probe with 3 hedge launches must re-eject")
+	}
+}
+
+func TestProbeGraduatesOnFastEvidence(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)
+	}
+	rt.mu.Lock()
+	rt.eject["mock/premium"] = time.Now().Add(-time.Second)
+	rt.mu.Unlock()
+	// Admitted probes complete fast (healed): no launches accumulate, so
+	// once the quota is spent the verdict graduates the model. With 1-in-10
+	// trickle, 12 admissions take ~120 routes; each admitted probe reports
+	// a fast outcome like the executor would on completion.
+	admitted := 0
+	for i := 0; i < 200 && admitted < 12; i++ {
+		plan, err := rt.Route(req, pol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range plan.Candidates {
+			if c.Model.ID == "mock/premium" && c.Reject == "" {
+				admitted++
+				rt.ReportOutcome("mock/premium", true, 900)
+				break
+			}
+		}
+	}
+	if admitted != 12 {
+		t.Fatalf("expected to spend the full probe quota, admitted %d", admitted)
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject != "" {
+			t.Fatalf("healed model must graduate, reject=%q", c.Reject)
+		}
+	}
+	// Primary in the vast majority of draws (epsilon floor forbids
+	// asserting a single draw).
+	premium := 0
+	for i := 0; i < 20; i++ {
+		p, err := rt.Route(req, pol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Attempts[0].ModelID == "mock/premium" {
+			premium++
+		}
+	}
+	if premium < 18 {
+		t.Fatalf("healed model should be primary, got %d/20", premium)
 	}
 }

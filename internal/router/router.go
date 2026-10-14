@@ -10,6 +10,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IMV-IN/conduit/internal/canonical"
@@ -137,12 +138,13 @@ func Select(ranked []*Candidate, ex Explore, u float64) (int, float64) {
 }
 
 // exploreScale narrows exploration when the caller stated an explicit quality
-// intent. "best" means "don't experiment on me": models more than a hair
-// below the winner leave the guard set and the epsilon floor halves.
-// Other objectives keep the policy's configured exploration.
+// intent. "best" means "don't experiment on me": the guard shrinks to 0.2x
+// (≈2pp of quality with best weights, safely below the typical winner gap so
+// near-ties don't leak in on floating-point boundaries) and the epsilon
+// floor halves. Other objectives keep the policy's configured values.
 func exploreScale(objective string) float64 {
 	if objective == "best" {
-		return 0.25
+		return 0.2
 	}
 	return 1.0
 }
@@ -177,6 +179,17 @@ type Plan struct {
 	DecisionID string
 	Attempts   []Attempt
 	HedgeDelay time.Duration
+	// HedgeDelayTotal pads HedgeDelay with the primary's expected output
+	// time. Streaming hedges on first-token time (HedgeDelay); non-streaming
+	// requests can only hedge on completion, so the executor uses the
+	// larger of the two. Computed from priors, never from live latency
+	// (which would delay the hedge exactly when it is needed most).
+	HedgeDelayTotal time.Duration
+	// HedgeMaxShare caps speculative hedged requests as a fraction of
+	// traffic (0.05 = 5%). The executor enforces it with a token bucket.
+	HedgeMaxShare float64
+	// HedgeBurst sizes the executor's token bucket (see hedgeBudget).
+	HedgeBurst int
 	Relaxed    []string
 	Candidates []*Candidate
 	Propensity float64
@@ -194,7 +207,12 @@ type Router struct {
 	betas    map[string]*stats.Beta // "task\x00model" -> Beta
 	breakers map[string]*health.Breaker
 	ewmaTTFT map[string]*stats.EWMA
-	rr       map[string]int // round-robin cursors
+	rr       map[string]int         // round-robin cursors (guarded by mu)
+	eject    map[string]time.Time   // model -> slow-ejection expiry (guarded by mu)
+	probe    map[string]*probeState // model -> post-eject trickle probe (guarded by mu)
+	hedged   map[string][]time.Time // model -> recent hedge-timer firings as primary (guarded by mu)
+	primary  map[string][]time.Time // model -> recent primary selections (guarded by mu)
+	mu       sync.Mutex
 	halfLife time.Duration
 }
 
@@ -205,6 +223,10 @@ func New(cfg *config.Config) *Router {
 		breakers: map[string]*health.Breaker{},
 		ewmaTTFT: map[string]*stats.EWMA{},
 		rr:       map[string]int{},
+		eject:    map[string]time.Time{},
+		probe:    map[string]*probeState{},
+		hedged:   map[string][]time.Time{},
+		primary:  map[string][]time.Time{},
 		halfLife: 7 * 24 * time.Hour,
 	}
 	now := time.Now()
@@ -259,9 +281,7 @@ func (r *Router) Feedback(task, model string, reward float64) {
 func (r *Router) ReportOutcome(model string, ok bool, ttftMs float64) {
 	r.Breaker(model).Report(time.Now(), ok)
 	if ok && ttftMs > 0 {
-		if e, ok2 := r.ewmaTTFT[model]; ok2 {
-			e.Add(ttftMs)
-		}
+		r.ewma(model).Add(ttftMs)
 	}
 }
 
@@ -329,6 +349,7 @@ func ObjectiveOf(requested string) string {
 func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) {
 	// Static strategies (baselines).
 	if p.Strategy == "fixed" && p.Model != "" {
+		r.notePrimary(p.Model)
 		return &Plan{
 			DecisionID: newDecisionID(req),
 			Attempts:   []Attempt{{ModelID: p.Model, Provider: providerOf(r.cfg, p.Model), Upstream: upstreamOf(r.cfg, p.Model)}},
@@ -337,8 +358,10 @@ func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) 
 		}, nil
 	}
 	if p.Strategy == "round_robin" && len(p.Models) > 0 {
+		r.mu.Lock()
 		i := r.rr[p.Name] % len(p.Models)
 		r.rr[p.Name]++
+		r.mu.Unlock()
 		mid := p.Models[i]
 		var attempts []Attempt
 		for k := 0; k < len(p.Models); k++ {
@@ -346,6 +369,7 @@ func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) 
 			attempts = append(attempts, Attempt{ModelID: m, Provider: providerOf(r.cfg, m), Upstream: upstreamOf(r.cfg, m)})
 		}
 		_ = mid
+		r.notePrimary(mid)
 		return &Plan{
 			DecisionID: newDecisionID(req), Attempts: attempts,
 			Propensity: 1.0 / float64(len(p.Models)), Policy: p.Name, Task: req.Task, TaskConf: req.TaskConf,
@@ -353,6 +377,7 @@ func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) 
 	}
 	// Pinned provider/model passthrough.
 	if m := r.cfg.ModelByID(req.Requested); m != nil {
+		r.notePrimary(m.ID)
 		return &Plan{
 			DecisionID: newDecisionID(req),
 			Attempts:   []Attempt{{ModelID: m.ID, Provider: m.Provider, Upstream: m.Upstream}},
@@ -464,11 +489,38 @@ func (r *Router) Route(req *canonical.Request, p *config.Policy) (*Plan, error) 
 	}
 
 	hd := time.Duration(0)
+	hs := 0.05
 	if eff.Hedging.Enabled && eff.Hedging.MinDelayMs > 0 {
 		hd = time.Duration(eff.Hedging.MinDelayMs) * time.Millisecond
 	}
+	if eff.Hedging.MaxShare > 0 {
+		hs = eff.Hedging.MaxShare
+	}
+	hb := eff.Hedging.Burst
+	if hb <= 0 {
+		hb = 100
+	}
+	// Non-streaming hedge delay pads first-token time with the primary's
+	// expected output time (priors, not live estimates).
+	hdTotal := hd
+	if hd > 0 && len(ranked) > idx {
+		tps := ranked[idx].Model.LatencyPrior.TokensPerSec
+		if tps <= 0 {
+			tps = 80
+		}
+		eOut := 48.0
+		if req.MaxOutput > 0 && float64(req.MaxOutput) < eOut {
+			eOut = float64(req.MaxOutput)
+		}
+		hdTotal = hd + time.Duration(eOut/tps*1000)*time.Millisecond
+	}
+	if len(attempts) > 0 {
+		r.notePrimary(attempts[0].ModelID)
+	}
 	return &Plan{
-		DecisionID: did, Attempts: attempts, HedgeDelay: hd, Relaxed: relaxed,
+		DecisionID: did, Attempts: attempts, HedgeDelay: hd, HedgeMaxShare: hs,
+		HedgeBurst:      hb,
+		HedgeDelayTotal: hdTotal, Relaxed: relaxed,
 		Candidates: all, Propensity: prop, Explored: explored, Chosen: idx,
 		Policy: eff.Name, Task: req.Task, TaskConf: req.TaskConf,
 		EstCost: ranked[idx].C,
@@ -516,6 +568,9 @@ func (r *Router) filterStrict(req *canonical.Request, m *config.Model, p *config
 	if !r.Breaker(m.ID).Allow(now) {
 		return "open breaker"
 	}
+	if reason := r.slowReject(m, now); reason != "" {
+		return reason
+	}
 	if len(p.AllowModels) > 0 && !globAny(p.AllowModels, m.ID) {
 		return "allow-list"
 	}
@@ -536,6 +591,202 @@ func (r *Router) filterStrict(req *canonical.Request, m *config.Model, p *config
 		if !hit {
 			return "residency"
 		}
+	}
+	return ""
+}
+
+// ewma returns the TTFT tracker for a model, creating it on demand.
+func (r *Router) ewma(id string) *stats.EWMA {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.ewmaTTFT[id]
+	if !ok {
+		e = &stats.EWMA{}
+		r.ewmaTTFT[id] = e
+	}
+	return e
+}
+
+// notePrimary records a primary selection for the ejection rate gate.
+func (r *Router) notePrimary(model string) {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary[model] = append(pruneBefore(r.primary[model], now.Add(-time.Minute)), now)
+}
+
+func (r *Router) primariesRecent(model string, now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.primary[model] = pruneBefore(r.primary[model], now.Add(-time.Minute))
+	return len(r.primary[model])
+}
+
+// ReportHedgeLaunched records that a hedge timer fired against this model
+// as primary — i.e. it exceeded its hedge delay. The launch itself is the
+// slowness signal (we cannot wait for the outcome: re-ejection must precede
+// the wave of slow completions, not follow it). A single firing means little
+// (healthy p99 exceedances happen); repeated firings eject the model.
+// Calibrate min_delay above healthy p99 first-token latency so healthy
+// traffic rarely fires.
+func (r *Router) ReportHedgeLaunched(model string) {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hedged[model] = append(pruneBefore(r.hedged[model], now.Add(-time.Minute)), now)
+}
+
+func pruneBefore(l []time.Time, cut time.Time) []time.Time {
+	i := 0
+	for i < len(l) && l[i].Before(cut) {
+		i++
+	}
+	return append([]time.Time(nil), l[i:]...)
+}
+
+// EjectUntil reports when a model's slow-ejection lifts (for the health API).
+func (r *Router) EjectUntil(model string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until, ok := r.eject[model]
+	return until, ok
+}
+
+func (r *Router) hedgedRecent(model string, now time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hedged[model] = pruneBefore(r.hedged[model], now.Add(-time.Minute))
+	return len(r.hedged[model])
+}
+
+// hedgedSince counts firings within an explicit window (no pruning side
+// effect beyond it). Used for the burst rule below.
+func (r *Router) hedgedSince(model string, now time.Time, window time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	cut := now.Add(-window)
+	for _, t := range r.hedged[model] {
+		if !t.Before(cut) {
+			n++
+		}
+	}
+	return n
+}
+
+// probeState is a post-ejection trickle probe. Re-admitting a still-slow
+// model to full traffic would recreate the storm the ejection contained, so
+// the model is re-admitted at 1-in-K filter checks while fresh evidence
+// forms. Quota bounds the total admitted probes; the verdict comes from
+// that evidence, not the quota itself. Slow probes hedge (their timer
+// fires); healed probes complete cleanly (no launches).
+type probeState struct {
+	quota int
+	used  int
+	since time.Time
+	seen  int
+}
+
+const probeQuota = 12
+
+// probeTrickle admits 1-in-K checks while probing. At 30 rps this sends
+// ~3 probes/s: enough for a verdict in seconds, cheap enough that every
+// probe hedges within budget.
+const probeTrickle = 10
+
+// slowReject implements latency ejection (DESIGN §8.1): a model is ejected
+// for 15 s when either (a) its measured first-token latency stays above 3x
+// its prior over ≥10 samples, (b) its hedge timer fired ≥25 times in 10 s
+// (correlated slowness; the floor sits ~3x above healthy exceedances at
+// 30 rps so variance alone cannot trip it), or (c) its firings sustain ≥5%
+// of its primary selections. On expiry the model enters a trickle probe
+// (1-in-10 checks, quota 12): three hedge launches re-eject it fast, a
+// spent quota with clean evidence graduates it. Recovery is therefore
+// bounded by one probe, and sustained slow-faults cost a few hedged probes
+// per 15 s cycle — inside the hedge budget.
+func (r *Router) slowReject(m *config.Model, now time.Time) string {
+	base := m.LatencyPrior.TTFTMs
+	if base <= 0 {
+		return ""
+	}
+	eject := func() string {
+		r.mu.Lock()
+		r.eject[m.ID] = now.Add(15 * time.Second)
+		delete(r.hedged, m.ID)
+		delete(r.primary, m.ID)
+		delete(r.probe, m.ID)
+		r.mu.Unlock()
+		return "slow: latency ejection"
+	}
+	e := r.ewma(m.ID)
+	v, n := e.Get()
+	r.mu.Lock()
+	until, ok := r.eject[m.ID]
+	r.mu.Unlock()
+	if ok {
+		if now.Before(until) {
+			return "slow: latency ejection"
+		}
+		// Expired: reset evidence and open a bounded trickle probe. The
+		// reset makes the model rank first so probes actually select it;
+		// the quota bounds the cost if it is still slow.
+		r.mu.Lock()
+		delete(r.eject, m.ID)
+		delete(r.hedged, m.ID)
+		delete(r.primary, m.ID)
+		r.probe[m.ID] = &probeState{quota: probeQuota, since: now}
+		r.mu.Unlock()
+		e.Reset(base)
+	}
+	r.mu.Lock()
+	pr, probing := r.probe[m.ID]
+	r.mu.Unlock()
+	if probing {
+		// Fast path: fresh launches already proved continued slowness.
+		// Launches are counted from probe start, so pre-probe history
+		// cannot trip this.
+		r.mu.Lock()
+		since := pr.since
+		r.mu.Unlock()
+		if r.hedgedSince(m.ID, now, now.Sub(since)) >= 3 {
+			return eject()
+		}
+		// Trickle admission: only 1-in-K checks may select the model.
+		// The reset above makes it rank first, so admitted checks track
+		// selections ~1:1 (minus exploration picks of others).
+		r.mu.Lock()
+		pr.seen++
+		admit := pr.seen%probeTrickle == 1
+		over := pr.used >= pr.quota
+		if admit && !over {
+			pr.used++
+		}
+		r.mu.Unlock()
+		if over {
+			// Quota spent: judge by fresh evidence. Slow completions
+			// backstop a starved hedge budget (no launches observable).
+			if v, n := e.Get(); n >= 3 && v > 3*base {
+				return eject()
+			}
+			r.mu.Lock()
+			delete(r.probe, m.ID)
+			r.mu.Unlock()
+			return "" // probes ran clean: graduate to full traffic
+		}
+		if !admit {
+			return "slow: probing"
+		}
+		return ""
+	}
+	if n >= 10 && v > 3*base {
+		return eject()
+	}
+	if r.hedgedSince(m.ID, now, 10*time.Second) >= 25 {
+		return eject()
+	}
+	lh := r.hedgedRecent(m.ID, now)
+	if lh >= 5 && float64(lh)/float64(max(1, r.primariesRecent(m.ID, now))) >= 0.05 {
+		return eject()
 	}
 	return ""
 }
@@ -588,7 +839,7 @@ func (r *Router) estimate(req *canonical.Request, m *config.Model, now time.Time
 	c := float64(req.InTokensEst)/1e6*m.PricePerMtok.Input + eOut/1e6*m.PricePerMtok.Output
 	// L: TTFT prior corrected by EWMA + output time.
 	ttft := m.LatencyPrior.TTFTMs
-	if v, cnt := r.ewmaTTFT[m.ID].Get(); cnt > 5 {
+	if v, cnt := r.ewma(m.ID).Get(); cnt > 5 {
 		ttft = 0.5*ttft + 0.5*v
 	}
 	tps := m.LatencyPrior.TokensPerSec

@@ -99,7 +99,12 @@ policies:
   - name: default
     objective: balanced
     exploration: { enabled: true, epsilon: 0.02, delta: 0.08, tau: 0.05 }
-    hedging: { enabled: true, min_delay_ms: 800, max_share: 0.05 }
+    # min_delay must exceed the HEALTHY p95 first-token latency of the slowest
+    # primary (else healthy traffic hedges and drains the 5% budget before it
+    # is needed). Non-stream requests additionally pad by expected output time.
+    # burst absorbs one detection transient (rate × hedge delay) without
+    # starving probes; sustained hedging stays capped by max_share.
+    hedging: { enabled: true, min_delay_ms: 1800, max_share: 0.05, burst: 100 }
     reliability: { max_attempts: 3, mid_stream: fail, retry_on_refusal: false }
     on_infeasible: relax
     on_soft_limit: downgrade

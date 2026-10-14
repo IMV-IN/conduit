@@ -136,3 +136,12 @@ func (e *EWMA) Get() (float64, int64) {
 	defer e.mu.Unlock()
 	return e.V, e.N
 }
+
+// Reset re-baselines the tracker to a prior value, dropping accumulated
+// evidence. The router uses it when a latency ejection expires so a healed
+// model competes fairly instead of carrying stale slowness forever.
+func (e *EWMA) Reset(prior float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.V, e.N = prior, 0
+}

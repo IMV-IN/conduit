@@ -132,11 +132,13 @@ Targets are *initial* budgets. Tighten them once you have measurements on your h
   hardware (every number in the targets table remains a goal until a
   measured run with published hardware details and raw JSON says otherwise).
   Suites `04` (learning) and `05` (soak) run in nightly but their
-  pass-criteria against real learning signal are still targets, not
-  measurements; judge/validator reward paths are stub-level. Measured
-  2026-10-14: `04` verdict FAIL at 0.815x accuracy-vs-best (needs 0.95x)
-  with cost at 0.027x — the learned policy over-avoids premium. The
-  learning-loop tuning that closes this gap is open work; nightly runs 04
-  non-gating (artifact kept) so it can't mask the other suites, and runs
-  it last with a fresh gateway per suite so its feedback can't leak into
-  `03`.
+  latency/accuracy gates are environment-sensitive. Measured 2026-10-14:
+  `04` verdict FAIL at 0.815x accuracy-vs-best (needs 0.95x) — the learned
+  policy over-avoids premium (open learning-loop tuning work); `05` at the
+  default 2000 rps saturates the *generator* on shared runners (110k dropped
+  iterations, VUs capped at 5000, so p95 measures k6 queueing, not service;
+  meanwhile 0/465k requests failed). Nightly therefore runs `04` and `05`
+  non-gating with artifacts kept, at reduced soak rate
+  (`MAX_RATE=500 HOLD=1m`); full-rate gates are meaningful only on isolated
+  hardware. Nightly runs `04` last with a fresh gateway per suite so its
+  feedback can't leak into `03`. Judge/validator reward paths are stub-level.

@@ -25,10 +25,38 @@ jobs:
           for i in $(seq 1 30); do
             curl -sf http://localhost:8080/healthz && break || sleep 2
           done
-      - run: make k6-all
+      - name: full k6 suites (dockerized k6; runner has no k6 binary)
+        run: |
+          mkdir -p test-results && chmod 777 test-results
+          for suite in 01_overhead.js 02_accuracy.js 04_learning.js; do
+            docker run --rm --network host -w /test \
+              -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+              -e RESULTS_DIR=/results \
+              -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+              -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+              -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+              grafana/k6:2.3.0 run /test/k6/$suite
+          done
+          for fault in errors down slow; do
+            docker run --rm --network host -w /test \
+              -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+              -e RESULTS_DIR=/results \
+              -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+              -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+              -e FAULT=$fault \
+              -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+              grafana/k6:2.3.0 run /test/k6/03_chaos.js
+          done
       - name: soak (weekly only)
         if: github.event.schedule == '0 3 * * 0' || github.event_name == 'workflow_dispatch'
-        run: make k6-soak
+        run: |
+          docker run --rm --network host -w /test \
+            -e BASE=http://localhost:8080 -e ADMIN=http://localhost:8081 -e MOCK=http://localhost:9001 \
+            -e RESULTS_DIR=/results \
+            -e CONDUIT_KEY=${{ secrets.CONDUIT_DEV_KEY || 'sk-conduit-dev' }} \
+            -e CONDUIT_ADMIN_KEY=${{ secrets.CONDUIT_ADMIN_KEY || 'admin-dev' }} \
+            -v "$PWD/test:/test:ro" -v "$PWD/test-results:/results" \
+            grafana/k6:2.3.0 run /test/k6/05_soak.js
       - uses: actions/upload-artifact@v7
         if: always()
         with:

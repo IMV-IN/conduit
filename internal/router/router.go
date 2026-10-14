@@ -694,6 +694,27 @@ const probeQuota = 12
 // probe hedges within budget.
 const probeTrickle = 10
 
+// peersDistressed reports whether any other model currently looks slow
+// itself: EWMA TTFT ≥1.5× its prior over ≥3 samples. Uniform slowdowns (a
+// slow CI runner, regional degradation) raise every model's latency
+// together; ejecting on absolute thresholds then just churns routing
+// without improving it — 02 caught exactly this on shared CI hardware
+// (best_prefers_premium_for_code collapsed to 44% with zero errors).
+// Models without samples are skipped: with nothing to compare against,
+// absolute evidence stands, so cold-start detection still works.
+func (r *Router) peersDistressed(mID string) bool {
+	for i := range r.cfg.Models {
+		o := &r.cfg.Models[i]
+		if o.ID == mID || o.LatencyPrior.TTFTMs <= 0 {
+			continue
+		}
+		if v, n := r.ewma(o.ID).Get(); n >= 3 && v > 1.5*o.LatencyPrior.TTFTMs {
+			return true
+		}
+	}
+	return false
+}
+
 // slowReject implements latency ejection (DESIGN §8.1): a model is ejected
 // for 15 s when either (a) its measured first-token latency stays above 3x
 // its prior over ≥10 samples, (b) its hedge timer fired ≥25 times in 10 s
@@ -710,6 +731,12 @@ func (r *Router) slowReject(m *config.Model, now time.Time) string {
 		return ""
 	}
 	eject := func() string {
+		// Uniform-slowness guard: ejecting one model while its peers are
+		// equally slow just churns. Per-request hedging (budget-capped)
+		// still rescues individually slow requests.
+		if r.peersDistressed(m.ID) {
+			return ""
+		}
 		r.mu.Lock()
 		r.eject[m.ID] = now.Add(15 * time.Second)
 		delete(r.hedged, m.ID)

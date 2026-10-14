@@ -593,3 +593,64 @@ func TestProbeGraduatesOnFastEvidence(t *testing.T) {
 		t.Fatalf("healed model should be primary, got %d/20", premium)
 	}
 }
+
+func TestUniformSlowdownBlocksEjection(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	// Every model ~6x its prior: a uniformly slow environment (shared CI
+	// runner), not a model-specific fault. Must NOT eject.
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)  // 6.7x of 900
+		rt.ReportOutcome("mock/balanced", true, 3000) // 6x of 500
+		rt.ReportOutcome("mock/fast", true, 1200)     // 6x of 200
+	}
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatalf("all models feasible: %v", err)
+	}
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject == "slow: latency ejection" {
+			t.Fatal("uniform slowdown must not eject: peers equally slow")
+		}
+	}
+}
+
+func TestSingleModelSlownessStillEjects(t *testing.T) {
+	cfg, err := config.Load("../../conduit.example.yaml")
+	if err != nil {
+		t.Skip("example config not found")
+	}
+	rt := New(cfg)
+	pol := cfg.PolicyByName("default")
+	// Only premium slow; peers healthy with enough samples to judge.
+	for i := 0; i < 12; i++ {
+		rt.ReportOutcome("mock/premium", true, 6000)
+		rt.ReportOutcome("mock/balanced", true, 500)
+		rt.ReportOutcome("mock/fast", true, 200)
+	}
+	req := &canonical.Request{
+		Requested: "auto:best", InTokensEst: 40, MaxOutput: 64,
+		Task: "code", TaskConf: 0.9, Metadata: map[string]string{},
+	}
+	plan, err := rt.Route(req, pol)
+	if err != nil {
+		t.Fatalf("other models must stay feasible: %v", err)
+	}
+	found := false
+	for _, c := range plan.Candidates {
+		if c.Model.ID == "mock/premium" && c.Reject == "slow: latency ejection" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("model-specific slowness must still eject with healthy peers")
+	}
+}

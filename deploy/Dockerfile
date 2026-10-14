@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ---- UI build (embedded into the binary; React app lands in Phase 5) ----
-FROM node:22-alpine AS ui
+FROM node:24-alpine AS ui
 WORKDIR /ui
 COPY ui/package*.json ./
 RUN if [ -f package.json ]; then npm ci; fi
@@ -8,7 +8,7 @@ COPY ui/ ./
 RUN if [ -f package.json ]; then npm run build; else mkdir -p dist && echo '<h1>Conduit</h1>' > dist/index.html; fi
 
 # ---- Go build (static, CGO-free) ----
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mockprovider ./test/mockprovider
 
 # ---- Runtime: conduit ----
-FROM gcr.io/distroless/static-debian12:nonroot AS conduit
+FROM gcr.io/distroless/static-debian13:nonroot AS conduit
 COPY --from=build /out/conduit /conduit
 COPY conduit.example.yaml /etc/conduit/conduit.yaml
 VOLUME ["/data"]
@@ -29,7 +29,7 @@ ENTRYPOINT ["/conduit"]
 CMD ["serve", "--config", "/etc/conduit/conduit.yaml"]
 
 # ---- Runtime: mock provider (test only) ----
-FROM gcr.io/distroless/static-debian12:nonroot AS mock
+FROM gcr.io/distroless/static-debian13:nonroot AS mock
 COPY --from=build /out/mockprovider /mockprovider
 EXPOSE 9001
 ENTRYPOINT ["/mockprovider", "-addr", ":9001"]

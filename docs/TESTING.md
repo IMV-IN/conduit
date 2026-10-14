@@ -53,7 +53,7 @@ docker compose -f deploy/docker-compose.yml --profile test run --rm k6 run /test
 FAULT=down make k6-chaos
 ```
 
-k6 v0.55+ is required for the `k6/execution` API used by `03` and `04`. Results land in `test-results/*.json`.
+k6 v2.3.0 is pinned in CI (`grafana/k6:2.3.0`); scripts need v0.55+ for the `k6/execution` API used by `03` and `04`. Results land in `test-results/*.json`.
 
 ## 3. Pass criteria
 

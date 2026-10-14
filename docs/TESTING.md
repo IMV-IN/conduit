@@ -133,4 +133,10 @@ Targets are *initial* budgets. Tighten them once you have measurements on your h
   measured run with published hardware details and raw JSON says otherwise).
   Suites `04` (learning) and `05` (soak) run in nightly but their
   pass-criteria against real learning signal are still targets, not
-  measurements; judge/validator reward paths are stub-level.
+  measurements; judge/validator reward paths are stub-level. Measured
+  2026-10-14: `04` verdict FAIL at 0.815x accuracy-vs-best (needs 0.95x)
+  with cost at 0.027x — the learned policy over-avoids premium. The
+  learning-loop tuning that closes this gap is open work; nightly runs 04
+  non-gating (artifact kept) so it can't mask the other suites, and runs
+  it last with a fresh gateway per suite so its feedback can't leak into
+  `03`.

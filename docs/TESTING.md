@@ -96,18 +96,20 @@ Targets are *initial* budgets. Tighten them once you have measurements on your h
 | Race and leak | `go test -race`, `goleak` after 10k cancelled streams and hedged requests |
 | UI | Playwright: config edit → dry-run diff → apply; decision explorer; live feed |
 
-## 6. CI wiring (suggested)
+## 6. CI wiring (implemented in `.github/workflows/`)
 
-1. PR: unit, property, race, `staticcheck`, `govulncheck`, `benchstat` on `internal/router`.
-2. PR (Compose): `01` (short: `DUR=15s RATE=300`), `02`, `03` with `FAULT=errors`.
-3. Nightly: full `01`–`04`, publish JSON as build artifacts, alert on regression > 20%.
-4. Weekly: `05` soak.
+1. PR (`ci.yml`, job `go`): build, vet, unit, `-race` on router/stats/health/classify/server, `staticcheck`, `govulncheck`, router `benchstat` artifact.
+2. PR (`ci.yml`, job `e2e`, compose stack + dockerized k6): `01` (short: `DUR=15s RATE=300`), `02`, `03` with `FAULT=errors`, then `make verify` overhead gate.
+3. PR (`ci.yml`, job `datasets`, best-effort): refresh public samples via `tools/datasets/fetch.py` (skips sources without secrets, never fails the build), uploads `extended.jsonl` + `SOURCES.md`.
+4. Nightly (`nightly.yml`, schedule + manual dispatch): full `01`, `02`, `03` × {errors, down, slow}, `04`, weekly/monthly `05` soak; publishes raw JSON artifacts.
+5. Release (`release.yml`, on `v*.*.*` tags): GoReleaser binaries + multi-arch images to Docker Hub and GHCR.
 
 ## 7. What has and has not been verified in this repo
 
-- Verified (v0 gateway, Go 1.22):
-  - `go build ./...`, `go vet ./...` clean; `go test ./internal/... ./pkg/...`
-    passes, including `-race` on router/stats/health/classify.
+- Verified (v0 gateway, Go 1.27):
+  - `go build ./...`, `go vet ./...`, `staticcheck`, `govulncheck` clean;
+    `go test ./...` passes, including `-race` on
+    router/stats/health/classify/server/config.
   - Classifier fixture: 32/32 on `test/datasets/tasks.jsonl`
     (`TestFixtureAccuracy`, gate ≥ 0.85).
   - Router property test: 20k randomized requests, hard capability/context
@@ -119,16 +121,16 @@ Targets are *initial* budgets. Tighten them once you have measurements on your h
     streaming SSE passthrough; `/v1/route`, `/v1/feedback`,
     `/admin/v1/runtime` all OK.
   - Mock provider compiles (`go vet`) and behaves as documented; all five k6
-    scripts parse under k6 v0.55; scripts `01` and `04` previously ran
-    end-to-end against a throwaway stand-in, which exposed and fixed two
-    harness bugs (a vacuous PASS when all requests fail, and double-counted
-    samples).
-- Not verified: full k6 suites `01`–`05` at the documented target rates on
-  isolated hardware (every number in the targets table remains a goal until a
+    scripts run green under k6 v2.3.0 (CI pins `grafana/k6:2.3.0`).
+  - Concurrent hedging + latency ejection implemented: `03` green on
+    `errors`, `down`, **and** `slow` locally (fault p95 3.5s < 4s target;
+    pre/recovered premium share ~99%). Slow-fault dynamics (ejection
+    cycling, probe storms, budget sizing) were debugged against live
+    `/metrics` + decision-ledger evidence; see `internal/router/slowReject`
+    and `internal/server/execute` comments for the calibrated constants.
+- Not verified: full k6 suites at the documented target rates on isolated
+  hardware (every number in the targets table remains a goal until a
   measured run with published hardware details and raw JSON says otherwise).
-  Suites `04` (learning) and `05` (soak) have only been syntax-checked plus
-  covered by the equivalent Go tests; `03` has run green for `FAULT=errors`
-  (locally and in CI) but the `down`/`slow` variants have not. Concurrent
-  hedging and latency-ejection are not yet implemented (sequential failover
-  only) — required before the `slow` variant can pass; tracked as Phase 2
-  remainder in `IMPLEMENTATION_PLAN.md`.
+  Suites `04` (learning) and `05` (soak) run in nightly but their
+  pass-criteria against real learning signal are still targets, not
+  measurements; judge/validator reward paths are stub-level.
